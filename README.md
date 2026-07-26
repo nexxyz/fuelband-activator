@@ -122,6 +122,13 @@ For a clean release-tree check (no device access):
 python .\check_release_layout.py
 ```
 
+## macOS variant
+
+The native macOS `hidapi` implementation is in [`macos/`](macos/), with its
+own requirements, README, and mocked tests. It is separate from the WSL
+transport and is currently untested on real macOS hardware in this
+environment.
+
 ## Disclaimer
 
 This is an independent, reverse-engineered hardware tool. It is not made,
