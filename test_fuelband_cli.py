@@ -39,6 +39,29 @@ class MockMarkDevice:
         raise AssertionError("unexpected command: %r" % (command,))
 
 
+class MockTargetDevice:
+    def __init__(self, readbacks):
+        self.readbacks = dict(readbacks)
+        self.exchange_calls = []
+        self.writes = []
+
+    def exchange(self, command):
+        command = bytes(command)
+        self.exchange_calls.append(command)
+        tag = 0x70 + len(self.exchange_calls)
+        if command[0] == cli.SETTING_SET:
+            self.writes.append(command)
+            return cli.Transaction(tag, b"", ack_response(tag))
+        if command[0] == cli.SETTING_GET and command[2] in cli.DAILY_TARGET_SETTING_IDS:
+            setting_id = command[2]
+            return cli.Transaction(
+                tag,
+                b"",
+                setting_response(tag, setting_id, self.readbacks[setting_id]),
+            )
+        raise AssertionError("unexpected command: %r" % (command,))
+
+
 class FramingTests(unittest.TestCase):
     def test_output_report_buckets_use_encoded_payload_length(self):
         self.assertEqual(cli.select_output_report(bytes(5)), 0x09)  # 2 + 5 = 7
@@ -185,6 +208,50 @@ class MarkImprintedFlowTests(unittest.TestCase):
         self.assertEqual(len(device.exchange_calls), 3)
 
 
+class SetTargetFlowTests(unittest.TestCase):
+    def test_target_payload_is_little_endian_for_all_days_in_order(self):
+        target = 0x12345678
+        target_bytes = b"\x78\x56\x34\x12"
+        device = MockTargetDevice(
+            {setting_id: target_bytes for setting_id in cli.DAILY_TARGET_SETTING_IDS}
+        )
+        with mock.patch.object(cli.time, "sleep"):
+            self.assertEqual(cli.command_set_target(device, str(target)), 0)
+        expected_writes = [
+            bytes((cli.SETTING_SET, setting_id, 4)) + target_bytes
+            for setting_id in cli.DAILY_TARGET_SETTING_IDS
+        ]
+        self.assertEqual(device.writes, expected_writes)
+        expected_calls = []
+        for setting_id in cli.DAILY_TARGET_SETTING_IDS:
+            expected_calls.extend(
+                (
+                    bytes((cli.SETTING_SET, setting_id, 4)) + target_bytes,
+                    bytes((cli.SETTING_GET, 1, setting_id)),
+                )
+            )
+        self.assertEqual(device.exchange_calls, expected_calls)
+
+    def test_target_readback_failure_stops_without_retry(self):
+        target_bytes = b"\x78\x56\x34\x12"
+        wrong = b"\x79\x56\x34\x12"
+        readbacks = {setting_id: target_bytes for setting_id in cli.DAILY_TARGET_SETTING_IDS}
+        readbacks[40] = wrong
+        device = MockTargetDevice(readbacks)
+        with self.assertRaises(cli.FuelBandError):
+            cli.command_set_target(device, 0x12345678)
+        self.assertEqual(len(device.writes), 1)
+        self.assertEqual(len(device.exchange_calls), 2)
+
+    def test_target_bounds(self):
+        self.assertEqual(cli.parse_target("1"), 1)
+        self.assertEqual(cli.parse_target("0xffffffff"), 0xFFFFFFFF)
+        for value in ("0", "0x100000000", "-1", "not-a-number"):
+            with self.subTest(value=value):
+                with self.assertRaises(cli.FuelBandError):
+                    cli.parse_target(value)
+
+
 class ReleaseStaticTests(unittest.TestCase):
     def test_wrapper_has_explicit_mark_switches_and_exact_usb_row_matching(self):
         wrapper = (Path(__file__).with_name("fuelband.ps1")).read_text(encoding="utf-8")
@@ -194,6 +261,8 @@ class ReleaseStaticTests(unittest.TestCase):
         self.assertIn("$fields[0] -eq $RequestedBusId", wrapper)
         self.assertIn('11ac:317d(\\s|$)', wrapper)
         self.assertIn('"--experimental", "--yes"', wrapper)
+        self.assertIn('"set-target"', wrapper)
+        self.assertIn("[string]$Fuel", wrapper)
 
     def test_cli_requires_mark_flags_before_opening_fuelband(self):
         for argv in (("mark-imprinted",), ("mark-imprinted", "--experimental")):

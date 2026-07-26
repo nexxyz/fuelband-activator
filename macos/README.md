@@ -34,6 +34,7 @@ python3 fuelband_macos.py status
 python3 fuelband_macos.py set-time
 python3 fuelband_macos.py set-time 2026-07-26T12:34:56-04:00
 python3 fuelband_macos.py set-name Alice
+python3 fuelband_macos.py set-target 5000
 python3 fuelband_macos.py mark-imprinted --experimental --yes
 ```
 
@@ -50,6 +51,13 @@ the requested value or up to two seconds later.
 `set-name` accepts printable ASCII of 1–23 bytes for writing. Setting 97 has a
 fixed 25-byte readback slot, so the implementation requires that width and
 NUL-trims the padded contents before comparison.
+
+`set-target FUEL` writes the same unsigned 32-bit little-endian NikeFuel daily
+target to settings 40–46, Monday through Sunday. This is a weekly daily-target
+operation, not a steps target. Each day is ACKed and read back before the next
+write. The operation is non-atomic: a disconnect can leave only some days
+updated. There are no hidden retries; rerun the command safely to converge
+the week. `FUEL` must be 1..0xffffffff.
 
 `mark-imprinted` is experimental and is **not proven to finish onboarding**.
 Both flags are required before it can write. It reads all four state bytes,
