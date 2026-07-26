@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.log
+*.bin
+*.zip
+*.exe
+*.pcap
+.env
+.venv/
+venv/
