@@ -132,6 +132,8 @@ class ResponseParserTests(unittest.TestCase):
 
 class SafetyTests(unittest.TestCase):
     def test_hid_identity_requires_usb_bus_and_exact_vid_pid(self):
+        self.assertTrue(cli.FUELBAND_PID_MAP[cli.SUPPORTED_PRODUCT_ID]["supported"])
+        self.assertFalse(cli.FUELBAND_PID_MAP[cli.LEGACY_PRODUCT_ID]["supported"])
         cli.validate_supported_hid_info(
             (cli.BUS_USB, cli.EXPECTED_VENDOR_ID, cli.EXPECTED_PRODUCT_ID)
         )
@@ -141,6 +143,32 @@ class SafetyTests(unittest.TestCase):
             )
         with self.assertRaises(cli.FuelBandError):
             cli.validate_supported_hid_info((cli.BUS_USB, 0x1234, cli.EXPECTED_PRODUCT_ID))
+        with self.assertRaisesRegex(cli.FuelBandError, "legacy/original"):
+            cli.validate_supported_hid_info(
+                (cli.BUS_USB, cli.EXPECTED_VENDOR_ID, cli.LEGACY_PRODUCT_ID)
+            )
+
+    def test_hidraw_matching_recognizes_legacy_family(self):
+        with mock.patch.object(cli.glob, "glob", return_value=["/dev/hidraw-legacy"]), mock.patch.object(
+            cli.os, "open", return_value=17
+        ), mock.patch.object(cli.os, "close"), mock.patch.object(
+            cli, "raw_hid_info",
+            return_value=(cli.BUS_USB, cli.EXPECTED_VENDOR_ID, cli.LEGACY_PRODUCT_ID),
+        ):
+            self.assertEqual(cli.find_unique_fuelband(), "/dev/hidraw-legacy")
+
+    def test_hidraw_family_ambiguity_fails_safe(self):
+        with mock.patch.object(cli.glob, "glob", return_value=["/dev/current", "/dev/legacy"]), mock.patch.object(
+            cli.os, "open", side_effect=(17, 18)
+        ), mock.patch.object(cli.os, "close"), mock.patch.object(
+            cli, "raw_hid_info",
+            side_effect=(
+                (cli.BUS_USB, cli.EXPECTED_VENDOR_ID, cli.SUPPORTED_PRODUCT_ID),
+                (cli.BUS_USB, cli.EXPECTED_VENDOR_ID, cli.LEGACY_PRODUCT_ID),
+            ),
+        ):
+            with self.assertRaisesRegex(cli.FuelBandError, "multiple known FuelBand-family"):
+                cli.find_unique_fuelband()
 
     def test_final_open_fd_is_revalidated_before_use(self):
         with mock.patch.object(cli.os, "geteuid", create=True, return_value=0), mock.patch.object(
@@ -155,6 +183,20 @@ class SafetyTests(unittest.TestCase):
                 self.assertEqual(device.fd, 41)
             raw_info.assert_called_once_with(41)
             close.assert_called_once_with(41)
+
+    def test_legacy_is_blocked_after_open_before_any_transfer(self):
+        with mock.patch.object(cli.os, "geteuid", create=True, return_value=0), mock.patch.object(
+            cli, "find_unique_fuelband", return_value="/dev/legacy-hidraw"
+        ), mock.patch.object(cli.os, "open", return_value=42), mock.patch.object(
+            cli.os, "close"
+        ) as close, mock.patch.object(
+            cli, "raw_hid_info",
+            return_value=(cli.BUS_USB, cli.EXPECTED_VENDOR_ID, cli.LEGACY_PRODUCT_ID),
+        ) as raw_info:
+            with self.assertRaisesRegex(cli.FuelBandError, "legacy/original"):
+                cli.FuelBand().__enter__()
+            raw_info.assert_called_once_with(42)
+            close.assert_called_once_with(42)
 
     def test_state_bit_preserves_all_other_bytes(self):
         original = bytes((0x00, 0xA5, 0x5A, 0xFF))
@@ -259,10 +301,29 @@ class ReleaseStaticTests(unittest.TestCase):
         self.assertIn("[switch]$Yes", wrapper)
         self.assertIn("Confirm-MarkImprintedSwitches", wrapper)
         self.assertIn("$fields[0] -eq $RequestedBusId", wrapper)
-        self.assertIn('11ac:317d(\\s|$)', wrapper)
+        self.assertIn("$FuelBandPidMap.ContainsKey($devicePid)", wrapper)
         self.assertIn('"--experimental", "--yes"', wrapper)
         self.assertIn('"set-target"', wrapper)
         self.assertIn("[string]$Fuel", wrapper)
+        self.assertIn("Get-FuelBandSelections", wrapper)
+        self.assertIn("Resolve-FuelBandSelection", wrapper)
+        self.assertIn('"11ac:6565"', wrapper)
+        self.assertIn("Multiple FuelBand-family devices", wrapper)
+        self.assertIn("Selected FuelBand BUSID", wrapper)
+        self.assertIn("Confirm-SupportedProtocol", wrapper)
+        self.assertIn("function Test-WslHidraw", wrapper)
+        self.assertIn("function Wait-WslHidraw", wrapper)
+        self.assertIn("Wait-WslHidraw $wsl $selection.Pid 10", wrapper)
+        self.assertIn("$ExpectedPid", wrapper)
+        self.assertIn("wsl_hidraw_probe.py", wrapper)
+        self.assertIn("Convert-ReleasePathToWsl", wrapper)
+        self.assertIn("$linuxProbe", wrapper)
+        self.assertNotIn('"--user", "root", "--", "python3", "-c"', wrapper)
+        self.assertIn("return $true", wrapper)
+        self.assertIn("return $false", wrapper)
+        self.assertIn("$deadline", wrapper)
+        self.assertIn("Start-Sleep -Milliseconds 250", wrapper)
+        self.assertIn("detach -BusId $($selection.BusId)", wrapper)
 
     def test_cli_requires_mark_flags_before_opening_fuelband(self):
         for argv in (("mark-imprinted",), ("mark-imprinted", "--experimental")):
@@ -270,6 +331,21 @@ class ReleaseStaticTests(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     cli.main(list(argv))
                 fuelband.assert_not_called()
+
+    def test_attach_readiness_static_scenarios_are_exact_and_bounded(self):
+        wrapper = (Path(__file__).with_name("fuelband.ps1")).read_text(encoding="utf-8")
+        probe = (Path(__file__).with_name("wsl_hidraw_probe.py")).read_text(encoding="utf-8")
+        # Unrelated hidraw nodes cannot satisfy the HID_ID vendor/product test.
+        self.assertIn("vendor == expected_vendor and product == expected_product", probe)
+        self.assertIn("return False", probe)
+        self.assertIn("/sys/class/hidraw/hidraw*/device/uevent", probe)
+        # A delayed matching node is retried with the selected PID as an arg.
+        self.assertIn("Test-WslHidraw $WslCommand $ExpectedPid", wrapper)
+        self.assertIn("Start-Sleep -Milliseconds 250", wrapper)
+        # The bounded wait returns false and attach reports cleanup on timeout.
+        self.assertIn("$deadline = (Get-Date).AddSeconds($TimeoutSeconds)", wrapper)
+        self.assertIn("return $false", wrapper)
+        self.assertIn("usbipd attach succeeded", wrapper)
 
 
 if __name__ == "__main__":
