@@ -27,6 +27,10 @@ DEVICE_STATE_SETTING = 78
 ACTIVATED_BIT = 1 << 1
 NAME_WRITE_MAX_BYTES = 23
 NAME_STORAGE_WIDTH = 25
+DAILY_TARGET_SETTING_IDS = tuple(range(40, 47))
+DAILY_TARGET_DAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+DAILY_TARGET_MIN = 1
+DAILY_TARGET_MAX = 0xFFFFFFFF
 STATUS_SETTING_ALLOWLIST = frozenset((DEVICE_STATE_SETTING, FIRST_NAME_SETTING))
 
 # Capacities are the encoded command payload after the output report ID:
@@ -292,6 +296,16 @@ def read_setting(device, setting_id, label, verbose=False):
     )
 
 
+def read_daily_target_setting(device, setting_id, label, verbose=False):
+    if setting_id not in DAILY_TARGET_SETTING_IDS:
+        raise FuelBandError("setting %d is not a daily-target setting" % setting_id)
+    transaction = device.exchange((SETTING_GET, 1, setting_id))
+    show_transaction(label, transaction, verbose)
+    return parse_setting_get(
+        transaction.response, transaction.tag, setting_id, expected_width=4
+    )
+
+
 def read_rtc_time(device, label="RTC time", verbose=False):
     transaction = device.exchange((RTC, 2))
     show_transaction(label, transaction, verbose)
@@ -330,6 +344,19 @@ def validate_name(name):
     if any(byte < 0x20 or byte > 0x7E for byte in encoded):
         raise FuelBandError("NAME must contain printable ASCII characters only")
     return encoded
+
+
+def parse_target(value):
+    try:
+        target = value if isinstance(value, int) else int(str(value), 0)
+    except (TypeError, ValueError) as error:
+        raise FuelBandError("FUEL must be an integer") from error
+    if not DAILY_TARGET_MIN <= target <= DAILY_TARGET_MAX:
+        raise FuelBandError(
+            "FUEL must be in the range %d..0x%08x"
+            % (DAILY_TARGET_MIN, DAILY_TARGET_MAX)
+        )
+    return target
 
 
 def mark_imprinted_value(value):
@@ -447,6 +474,26 @@ def command_set_name(device, name, verbose=False):
     return 0
 
 
+def command_set_target(device, fuel, verbose=False):
+    target = parse_target(fuel)
+    target_bytes = target.to_bytes(4, "little", signed=False)
+    for day_name, setting_id in zip(DAILY_TARGET_DAY_NAMES, DAILY_TARGET_SETTING_IDS):
+        command = bytes((SETTING_SET, setting_id, 4)) + target_bytes
+        transaction = device.exchange(command)
+        show_transaction("set-target %s ACK (setting %d)" % (day_name, setting_id), transaction, verbose)
+        parse_ack(transaction.response, transaction.tag)
+        readback = read_daily_target_setting(
+            device, setting_id, "set-target %s readback (setting %d)" % (day_name, setting_id), verbose
+        )
+        if readback != target_bytes:
+            raise FuelBandError(
+                "set-target %s readback mismatch: expected %s, got %s"
+                % (day_name, target_bytes.hex(" "), readback.hex(" "))
+            )
+        print("%s: NikeFuel daily target %d verified" % (day_name, target))
+    return 0
+
+
 def command_mark_imprinted(device, verbose=False):
     print("WARNING: experimental mark-imprinted is NOT proven to finish onboarding.")
     old_value = read_setting(device, DEVICE_STATE_SETTING, "mark-imprinted readback before", verbose)
@@ -483,6 +530,10 @@ def build_parser():
     set_time.add_argument("timestamp", nargs="?", help="optional ISO-8601 timestamp")
     set_name = subparsers.add_parser("set-name", help="set and verify a printable ASCII name")
     set_name.add_argument("name", metavar="NAME", help="1-23 printable ASCII bytes")
+    set_target = subparsers.add_parser(
+        "set-target", help="set and verify one NikeFuel daily target for Monday-Sunday"
+    )
+    set_target.add_argument("fuel", metavar="FUEL", help="1..0xffffffff NikeFuel value")
     mark = subparsers.add_parser(
         "mark-imprinted",
         help="EXPERIMENTAL: set state bit 1; not proven to finish onboarding",
@@ -506,6 +557,8 @@ def main(argv=None):
                 return command_set_time(device, args.timestamp, args.verbose)
             if args.command == "set-name":
                 return command_set_name(device, args.name, args.verbose)
+            if args.command == "set-target":
+                return command_set_target(device, args.fuel, args.verbose)
             if args.command == "mark-imprinted":
                 return command_mark_imprinted(device, args.verbose)
             raise FuelBandError("unknown command %s" % args.command)

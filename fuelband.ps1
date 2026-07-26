@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet("attach", "detach", "status", "set-time", "set-name", "mark-imprinted")]
+    [ValidateSet("attach", "detach", "status", "set-time", "set-name", "set-target", "mark-imprinted")]
     [string]$Command,
 
     [Parameter(Position = 1)]
@@ -10,6 +10,8 @@ param(
     [string]$BusId,
 
     [string]$Distribution,
+
+    [string]$Fuel,
 
     [switch]$VerboseOutput,
 
@@ -135,6 +137,12 @@ function Invoke-WslCli($WslCommand) {
     }
     if ($Command -eq "set-time" -and -not [string]::IsNullOrWhiteSpace($Name)) {
         $arguments += $Name
+    }
+    if ($Command -eq "set-target") {
+        if ([string]::IsNullOrWhiteSpace($Fuel)) {
+            Stop-Clearly "set-target requires a -Fuel value from 1 through 0xffffffff."
+        }
+        $arguments += $Fuel
     }
     if ($Command -eq "mark-imprinted") {
         $arguments += @("--experimental", "--yes")

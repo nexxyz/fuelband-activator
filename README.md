@@ -68,6 +68,7 @@ The supported commands are:
 .\fuelband.ps1 set-time
 .\fuelband.ps1 set-time 2026-07-26T12:34:56-04:00
 .\fuelband.ps1 set-name Alice
+.\fuelband.ps1 set-target -Fuel 5000
 .\fuelband.ps1 mark-imprinted -Experimental -Yes
 ```
 
@@ -80,6 +81,14 @@ later.
 `set-name` accepts printable ASCII only, from 1 through 23 bytes, and
 verifies setting 97 after the write. The device readback slot is fixed at 25
 bytes; the returned name is NUL-trimmed from that padded storage value.
+
+`set-target FUEL` writes the same unsigned 32-bit little-endian **NikeFuel
+daily target** to settings 40–46, Monday through Sunday, one day at a time.
+This is a weekly daily-target operation, not a steps target. Each day requires
+an ACK and strict readback verification before the next day is attempted. The
+operation is non-atomic: a disconnect can leave only some days updated. There
+are no hidden retries; rerun the command safely to converge all seven days.
+`FUEL` must be in the range 1..0xffffffff.
 
 `mark-imprinted` is **experimental** and is not proven to finish onboarding.
 Both the PowerShell wrapper switches `-Experimental -Yes` and the Python CLI
@@ -103,6 +112,7 @@ normally `/mnt/f`):
 sudo python3 /mnt/f/dev/fuelband-activator/release/fuelband_cli.py status
 sudo python3 /mnt/f/dev/fuelband-activator/release/fuelband_cli.py --verbose status
 sudo python3 /mnt/f/dev/fuelband-activator/release/fuelband_cli.py set-time 2026-07-26T12:34:56Z
+sudo python3 /mnt/f/dev/fuelband-activator/release/fuelband_cli.py set-target 5000
 sudo python3 /mnt/f/dev/fuelband-activator/release/fuelband_cli.py mark-imprinted --experimental --yes
 ```
 
