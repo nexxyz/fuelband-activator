@@ -5,11 +5,14 @@ This directory is a separate native macOS artifact. It uses the external
 macOS's native HID transport. It does not use WSL, `hidraw`, usbipd, kernel
 drivers, or a custom driver.
 
-The implementation is limited to exactly one HID collection with VID:PID
-`11AC:317D`, usage page `0xFF00`, and usage `0x01`. It sends 64-byte
-zero-padded feature reports, selects output report IDs 09/0A/0B/0C from
-framed command length, requests input feature report ID 04, and accepts only
-the observed protocol response report ID 01.
+The implementation recognizes Nike FuelBand family VID:PID `11AC:317D`
+(supported SE/current protocol) and `11AC:6565` (detected legacy/original
+protocol). Only one `11AC:317D` HID collection with usage page `0xFF00` and
+usage `0x01` is selected. PID `6565` is reported as legacy unsupported before
+opening or sending any protocol command. It sends 64-byte zero-padded feature
+reports, selects output report IDs 09/0A/0B/0C from framed command length,
+requests input feature report ID 04, and accepts only the observed protocol
+response report ID 01.
 
 ## Install
 

@@ -220,12 +220,14 @@ class FakeHidModule:
         self.entries = entries
         self.fake_device = device
         self.enumerate_calls = []
+        self.device_calls = 0
 
     def enumerate(self, vendor_id, product_id):
         self.enumerate_calls.append((vendor_id, product_id))
         return self.entries
 
     def device(self):
+        self.device_calls += 1
         return self.fake_device
 
 
@@ -247,7 +249,7 @@ class HidTransportTests(unittest.TestCase):
         with mock.patch.object(cli, "hid", fake_hid):
             with cli.FuelBand() as device:
                 transaction = device.exchange(bytes((cli.SETTING_GET, 1, 78)))
-        self.assertEqual(fake_hid.enumerate_calls, [(0x11AC, 0x317D)])
+        self.assertEqual(fake_hid.enumerate_calls, [(0x11AC, 0)])
         self.assertEqual(fake_device.path, b"mock-path")
         self.assertEqual(len(fake_device.sent_reports), 1)
         self.assertEqual(len(fake_device.sent_reports[0]), 64)
@@ -333,6 +335,47 @@ class HidTransportTests(unittest.TestCase):
             with self.subTest(metadata=metadata), mock.patch.object(cli, "hid", fake_hid):
                 with self.assertRaises(cli.FuelBandError):
                     cli.enumerate_fuelband()
+
+    def test_legacy_family_is_rejected_before_open(self):
+        fake_device = FakeHidDevice()
+        fake_hid = FakeHidModule(
+            [
+                {
+                    "vendor_id": 0x11AC,
+                    "product_id": 0x6565,
+                    "path": "legacy-path",
+                }
+            ],
+            fake_device,
+        )
+        with mock.patch.object(cli, "hid", fake_hid):
+            with self.assertRaisesRegex(cli.FuelBandError, "legacy/original"):
+                cli.enumerate_fuelband()
+        self.assertEqual(fake_hid.device_calls, 0)
+
+    def test_family_map_and_ambiguous_known_devices_fail_safe(self):
+        self.assertTrue(cli.FUELBAND_PID_MAP[cli.SUPPORTED_PRODUCT_ID]["supported"])
+        self.assertFalse(cli.FUELBAND_PID_MAP[cli.LEGACY_PRODUCT_ID]["supported"])
+        fake_hid = FakeHidModule(
+            [
+                {
+                    "vendor_id": 0x11AC,
+                    "product_id": 0x317D,
+                    "usage_page": 0xFF00,
+                    "usage": 0x01,
+                    "path": "current-path",
+                },
+                {
+                    "vendor_id": 0x11AC,
+                    "product_id": 0x6565,
+                    "path": "legacy-path",
+                },
+            ],
+            FakeHidDevice(),
+        )
+        with mock.patch.object(cli, "hid", fake_hid):
+            with self.assertRaisesRegex(cli.FuelBandError, "exactly one"):
+                cli.enumerate_fuelband()
 
 
 if __name__ == "__main__":

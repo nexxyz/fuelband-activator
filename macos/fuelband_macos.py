@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Native macOS FuelBand maintenance CLI using the external hidapi package."""
+"""Native macOS FuelBand maintenance CLI using the external hidapi package.
+
+The 0x11AC:0x317D current protocol is supported; detected 0x11AC:0x6565
+legacy/original devices are refused before any transfer.
+"""
 
 import argparse
 import datetime as datetime_module
@@ -14,7 +18,14 @@ except ImportError:  # Tests can inject a fake module; real use needs hidapi.
 
 FEATURE_SIZE = 64
 HID_VENDOR_ID = 0x11AC
-HID_PRODUCT_ID = 0x317D
+SUPPORTED_PRODUCT_ID = 0x317D
+LEGACY_PRODUCT_ID = 0x6565
+FUELBAND_PID_MAP = {
+    SUPPORTED_PRODUCT_ID: {"name": "supported SE/current protocol", "supported": True},
+    LEGACY_PRODUCT_ID: {"name": "legacy/original protocol", "supported": False},
+}
+# Backward-compatible name for the supported current protocol.
+HID_PRODUCT_ID = SUPPORTED_PRODUCT_ID
 HID_USAGE_PAGE = 0xFF00
 HID_USAGE = 0x01
 INPUT_REPORT_ID = 0x04
@@ -175,29 +186,40 @@ def enumerate_fuelband():
     if hid is None:
         raise FuelBandError("hidapi is unavailable; install requirements.txt first")
     try:
-        entries = list(hid.enumerate(HID_VENDOR_ID, HID_PRODUCT_ID) or [])
+        entries = list(hid.enumerate(HID_VENDOR_ID, 0) or [])
     except Exception as error:
         raise FuelBandError("hidapi enumeration failed: %s" % error) from error
     matches = [
         entry
         for entry in entries
         if entry.get("vendor_id") == HID_VENDOR_ID
-        and entry.get("product_id") == HID_PRODUCT_ID
-        and entry.get("usage_page") == HID_USAGE_PAGE
-        and entry.get("usage") == HID_USAGE
+        and entry.get("product_id") in FUELBAND_PID_MAP
     ]
     if not matches:
         raise FuelBandError(
-            "no HID collection matched VID:PID %04X:%04X"
-            % (HID_VENDOR_ID, HID_PRODUCT_ID)
+            "no known FuelBand-family HID collection matched VID:PID %04X:%04X or %04X:%04X"
+            % (HID_VENDOR_ID, SUPPORTED_PRODUCT_ID, HID_VENDOR_ID, LEGACY_PRODUCT_ID)
         )
     if len(matches) != 1:
         raise FuelBandError(
             "expected exactly one matching HID collection, found %d" % len(matches)
         )
-    if not matches[0].get("path"):
+    selected = matches[0]
+    selected_pid = selected["product_id"]
+    if not FUELBAND_PID_MAP[selected_pid]["supported"]:
+        raise FuelBandError(
+            "legacy/original FuelBand PID 0x%04X detected; this CLI does not support "
+            "its protocol framing and sent no command" % selected_pid
+        )
+    if selected.get("usage_page") != HID_USAGE_PAGE or selected.get("usage") != HID_USAGE:
+        raise FuelBandError(
+            "supported FuelBand PID 0x%04X has wrong or missing HID usage metadata; "
+            "expected 0x%04X:0x%02X"
+            % (selected_pid, HID_USAGE_PAGE, HID_USAGE)
+        )
+    if not selected.get("path"):
         raise FuelBandError("matching HID collection has no hidapi path")
-    return matches[0]
+    return selected
 
 
 class FuelBand:

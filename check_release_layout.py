@@ -13,6 +13,8 @@ EXPECTED_ROOT_FILES = frozenset(
         "fuelband_cli.py",
         "fuelband.ps1",
         "test_fuelband_cli.py",
+        "test_wsl_hidraw_probe.py",
+        "wsl_hidraw_probe.py",
         "macos",
     }
 )

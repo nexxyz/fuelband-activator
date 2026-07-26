@@ -21,6 +21,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$FuelBandPidMap = @{
+    "11ac:317d" = "supported SE/current protocol"
+    "11ac:6565" = "legacy/original protocol (unsupported framing)"
+}
 
 function Stop-Clearly([string]$Message) {
     throw $Message
@@ -68,6 +72,36 @@ function Confirm-Wsl($WslCommand) {
     }
 }
 
+function Test-WslHidraw($WslCommand, [string]$ExpectedPid) {
+    $probePath = Join-Path $PSScriptRoot "wsl_hidraw_probe.py"
+    if (-not (Test-Path -LiteralPath $probePath)) {
+        Stop-Clearly "wsl_hidraw_probe.py is missing from the release directory."
+    }
+    $linuxProbe = Convert-ReleasePathToWsl $PSScriptRoot "wsl_hidraw_probe.py"
+    $arguments = @()
+    if (-not [string]::IsNullOrWhiteSpace($Distribution)) {
+        $arguments += @("-d", $Distribution)
+    }
+    # The helper is a static file; ExpectedPid is passed as data, never code.
+    $arguments += @("--user", "root", "--", "python3", $linuxProbe, $ExpectedPid)
+    $null = & $WslCommand.Source @arguments 2>$null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Wait-WslHidraw($WslCommand, [string]$ExpectedPid, [int]$TimeoutSeconds) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        if (Test-WslHidraw $WslCommand $ExpectedPid) {
+            return $true
+        }
+        if ((Get-Date) -ge $deadline) {
+            break
+        }
+        Start-Sleep -Milliseconds 250
+    } while ($true)
+    return $false
+}
+
 function Get-UsbipdDeviceList($UsbipdCommand) {
     $lines = @(& $UsbipdCommand.Source list 2>&1)
     if ($LASTEXITCODE -ne 0) {
@@ -92,25 +126,68 @@ function Find-UsbipdRow([string[]]$DeviceList, [string]$RequestedBusId) {
     return $rows[0]
 }
 
-function Confirm-BusId($UsbipdCommand, [string]$RequestedBusId) {
-    if ([string]::IsNullOrWhiteSpace($RequestedBusId)) {
-        Stop-Clearly "A USB bus ID is required. Run 'usbipd list', then pass -BusId BUSID."
+function Get-FuelBandSelections([string[]]$DeviceList) {
+    $selections = @()
+    foreach ($line in $DeviceList) {
+        $fields = ("$line").Trim() -split "\s+"
+        $devicePid = if ($fields.Count -ge 2) { $fields[1].ToLowerInvariant() } else { "" }
+        if ($FuelBandPidMap.ContainsKey($devicePid)) {
+            $selections += [PSCustomObject]@{
+                BusId = $fields[0]
+                Pid = $devicePid
+                Row = "$line"
+            }
+        }
     }
+    return $selections
+}
+
+function Resolve-FuelBandSelection($UsbipdCommand, [string]$RequestedBusId) {
     $deviceList = @(Get-UsbipdDeviceList $UsbipdCommand)
-    $row = Find-UsbipdRow $deviceList $RequestedBusId
-    if ($row -notmatch "(?i)(^|\s)11ac:317d(\s|$)") {
-        Stop-Clearly "BUSID '$RequestedBusId' is not the supported FuelBand VID:PID 11AC:317D."
+    if (-not [string]::IsNullOrWhiteSpace($RequestedBusId)) {
+        $row = Find-UsbipdRow $deviceList $RequestedBusId
+        $fields = ("$row").Trim() -split "\s+"
+        $devicePid = if ($fields.Count -ge 2) { $fields[1].ToLowerInvariant() } else { "" }
+        if (-not $FuelBandPidMap.ContainsKey($devicePid)) {
+            Stop-Clearly "BUSID '$RequestedBusId' is not a known FuelBand-family device (11AC:317D or 11AC:6565)."
+        }
+        $selection = [PSCustomObject]@{
+            BusId = $fields[0]
+            Pid = $devicePid
+            Row = "$row"
+        }
+    } else {
+        $selections = @(Get-FuelBandSelections $deviceList)
+        if ($selections.Count -eq 0) {
+            Stop-Clearly "No known FuelBand-family USB row was found. Run 'usbipd list' and pass -BusId if needed."
+        }
+        if ($selections.Count -ne 1) {
+            Stop-Clearly "Multiple FuelBand-family devices were found; pass -BusId to select one explicitly."
+        }
+        $selection = $selections[0]
+    }
+    Write-Host ("Selected FuelBand BUSID {0}, VID:PID {1}" -f $selection.BusId, $selection.Pid)
+    return $selection
+}
+
+function Confirm-SupportedProtocol($Selection) {
+    if ($Selection.Pid -ieq "11ac:6565") {
+        Stop-Clearly "Legacy/original FuelBand PID 11AC:6565 detected. This CLI does not support its protocol framing; attach/detach only, no WSL command was invoked."
     }
 }
 
-function Convert-ScriptPathToWsl([string]$WindowsPath) {
+function Convert-ReleasePathToWsl([string]$WindowsPath, [string]$LinuxFileName) {
     $resolved = (Resolve-Path -LiteralPath $WindowsPath).Path
     if ($resolved.Length -lt 3 -or $resolved[1] -ne ":") {
         Stop-Clearly "The release directory is not on a local drive that WSL can mount: $resolved"
     }
     $drive = $resolved.Substring(0, 1).ToLowerInvariant()
     $rest = $resolved.Substring(2).Replace("\", "/")
-    return "/mnt/$drive$rest/fuelband_cli.py"
+    return "/mnt/$drive$rest/$LinuxFileName"
+}
+
+function Convert-ScriptPathToWsl([string]$WindowsPath) {
+    return Convert-ReleasePathToWsl $WindowsPath "fuelband_cli.py"
 }
 
 function Invoke-WslCli($WslCommand) {
@@ -159,27 +236,32 @@ try {
     $usbipd = Get-RequiredCommand "usbipd.exe"
 
     if ($Command -eq "attach") {
+        $selection = Resolve-FuelBandSelection $usbipd $BusId
         $wsl = Get-RequiredCommand "wsl.exe"
         Confirm-Wsl $wsl
-        Confirm-BusId $usbipd $BusId
-        & $usbipd.Source attach --wsl --busid $BusId
+        & $usbipd.Source attach --wsl --busid $selection.BusId
         if ($LASTEXITCODE -ne 0) {
-            Stop-Clearly "usbipd attach failed for '$BusId'. Confirm the one-time admin bind was completed."
+            Stop-Clearly "usbipd attach failed for '$($selection.BusId)'. Confirm the one-time admin bind was completed."
         }
-        Write-Host "Attached '$BusId' to WSL."
+        if (-not (Wait-WslHidraw $wsl $selection.Pid 10)) {
+            Stop-Clearly "usbipd attach succeeded, but WSL did not expose a matching $($selection.Pid) hidraw collection within 10 seconds. Clean up with: .\fuelband.ps1 detach -BusId $($selection.BusId)"
+        }
+        Write-Host "Attached '$($selection.BusId)' to WSL."
         exit 0
     }
 
     if ($Command -eq "detach") {
-        Confirm-BusId $usbipd $BusId
-        & $usbipd.Source detach --busid $BusId
+        $selection = Resolve-FuelBandSelection $usbipd $BusId
+        & $usbipd.Source detach --busid $selection.BusId
         if ($LASTEXITCODE -ne 0) {
-            Stop-Clearly "usbipd detach failed for '$BusId'."
+            Stop-Clearly "usbipd detach failed for '$($selection.BusId)'."
         }
-        Write-Host "Detached '$BusId'."
+        Write-Host "Detached '$($selection.BusId)'."
         exit 0
     }
 
+    $selection = Resolve-FuelBandSelection $usbipd $BusId
+    Confirm-SupportedProtocol $selection
     $wsl = Get-RequiredCommand "wsl.exe"
     Invoke-WslCli $wsl
     exit 0

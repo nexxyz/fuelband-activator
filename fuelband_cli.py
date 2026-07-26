@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Small, dependency-free FuelBand CLI for Linux hidraw under WSL.
 
-Only the supported 0x11AC:0x317D FuelBand interface is selected.  ``status``
-is read-only; the other commands perform one narrow, verified update.
+The 0x11AC:0x317D interface is the supported current protocol. The detected
+0x11AC:0x6565 legacy/original family member is refused before any transfer.
+``status`` is read-only; the other commands perform one narrow, verified update.
 """
 
 import argparse
@@ -27,7 +28,14 @@ HIDIOCGFEATURE_64 = 0xC0404807
 
 BUS_USB = 0x03
 EXPECTED_VENDOR_ID = 0x11AC
-EXPECTED_PRODUCT_ID = 0x317D
+SUPPORTED_PRODUCT_ID = 0x317D
+LEGACY_PRODUCT_ID = 0x6565
+FUELBAND_PID_MAP = {
+    SUPPORTED_PRODUCT_ID: {"name": "supported SE/current protocol", "supported": True},
+    LEGACY_PRODUCT_ID: {"name": "legacy/original protocol", "supported": False},
+}
+# Backward-compatible name for the supported current protocol.
+EXPECTED_PRODUCT_ID = SUPPORTED_PRODUCT_ID
 INPUT_REPORT_ID = 0x04
 RESPONSE_REPORT_ID = 0x01
 
@@ -87,7 +95,7 @@ def raw_hid_info(fd):
 
 
 def validate_supported_hid_info(info, context="hidraw device"):
-    """Require a USB hidraw node for the supported FuelBand VID/PID."""
+    """Require a USB hidraw node for the supported current FuelBand protocol."""
 
     bus_type, vendor_id, product_id = info
     if bus_type != BUS_USB:
@@ -95,21 +103,32 @@ def validate_supported_hid_info(info, context="hidraw device"):
             "%s is not USB (bus type 0x%02x; expected 0x%02x)"
             % (context, bus_type, BUS_USB)
         )
-    if vendor_id != EXPECTED_VENDOR_ID or product_id != EXPECTED_PRODUCT_ID:
+    if vendor_id != EXPECTED_VENDOR_ID:
         raise FuelBandError(
-            "%s is VID:PID %04X:%04X, not %04X:%04X"
+            "%s is VID:PID %04X:%04X, not FuelBand VID 0x%04X"
             % (
                 context,
                 vendor_id,
                 product_id,
                 EXPECTED_VENDOR_ID,
-                EXPECTED_PRODUCT_ID,
             )
         )
+    profile = FUELBAND_PID_MAP.get(product_id)
+    if profile is None:
+        raise FuelBandError(
+            "%s has unknown FuelBand-family PID 0x%04X" % (context, product_id)
+        )
+    if not profile["supported"]:
+        raise FuelBandError(
+            "%s is legacy/original FuelBand PID 0x%04X; this CLI does not support "
+            "its protocol framing and sent no command"
+            % (context, product_id)
+        )
+    return profile
 
 
 def find_unique_fuelband(pattern=HIDRAW_GLOB):
-    """Return the only hidraw path matching the supported VID/PID."""
+    """Return the only hidraw path matching a known FuelBand-family PID."""
 
     paths = sorted(glob.glob(pattern))
     if not paths:
@@ -122,7 +141,7 @@ def find_unique_fuelband(pattern=HIDRAW_GLOB):
         try:
             fd = os.open(path, os.O_RDONLY)
             info = raw_hid_info(fd)
-            if info[0] == BUS_USB and info[1] == EXPECTED_VENDOR_ID and info[2] == EXPECTED_PRODUCT_ID:
+            if info[0] == BUS_USB and info[1] == EXPECTED_VENDOR_ID and info[2] in FUELBAND_PID_MAP:
                 matches.append(path)
         except (OSError, FuelBandError) as error:
             inspection_errors.append("%s: %s" % (path, error))
@@ -137,13 +156,13 @@ def find_unique_fuelband(pattern=HIDRAW_GLOB):
         )
     if not matches:
         raise FuelBandError(
-            "no hidraw device matched VID:PID %04X:%04X"
-            % (EXPECTED_VENDOR_ID, EXPECTED_PRODUCT_ID)
+            "no hidraw device matched known FuelBand VID:PID %04X:%04X or %04X:%04X"
+            % (EXPECTED_VENDOR_ID, SUPPORTED_PRODUCT_ID, EXPECTED_VENDOR_ID, LEGACY_PRODUCT_ID)
         )
     if len(matches) != 1:
         raise FuelBandError(
-            "multiple hidraw devices matched VID:PID %04X:%04X: %s"
-            % (EXPECTED_VENDOR_ID, EXPECTED_PRODUCT_ID, ", ".join(matches))
+            "multiple known FuelBand-family hidraw devices matched: %s"
+            % ", ".join(matches)
         )
     return matches[0]
 
